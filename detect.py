@@ -1,8 +1,10 @@
 from flask import Flask, render_template, Response, jsonify
+from flask_cors import CORS  # CORS import 추가
 import cv2
 import threading
 
 app = Flask(__name__)
+CORS(app)  # CORS 활성화
 
 # 카메라 연결
 cap = cv2.VideoCapture(0)
