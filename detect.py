@@ -1,81 +1,88 @@
-from flask import Flask, Response, jsonify
-from flask_socketio import SocketIO, emit
-from flask_cors import CORS
-import torch
+from flask import Flask, render_template, Response, jsonify
 import cv2
 import threading
 
-# Flask 애플리케이션 초기화
 app = Flask(__name__)
-CORS(app)  # CORS 활성화, 외부에서의 요청 허용
-socketio = SocketIO(app, cors_allowed_origins="*")  # WebSocket CORS 설정
 
-# YOLOv5 모델 로드 (객체 감지용)
-model = torch.hub.load('ultralytics/yolov5', 'yolov5s')
-
-# MJPEG 비디오 스트림 설정 (Jetson Nano에서 처리한 비디오 스트림을 받아 처리)
+# 카메라 연결
 cap = cv2.VideoCapture(0)
 
-# 객체 감지 함수
-def detect_objects(frame):
-    results = model(frame)
-    detections = []
-    for *xyxy, conf, cls in results.xyxy[0]:
-        label = model.names[int(cls)]
-        confidence = conf.item()
-        detections.append({'label': label, 'confidence': confidence})
-    return detections
+# YOLO 모델 파일 경로
+yolo_net = cv2.dnn.readNet("yolov4.weights", "yolov4.cfg")
+layer_names = yolo_net.getLayerNames()
+output_layers = [layer_names[i-1] for i in yolo_net.getUnconnectedOutLayers()]
 
-# MJPEG 비디오 스트림 생성
-def generate_video_stream():
+with open("coco.names", "r") as f:
+    classes = [line.strip() for line in f.readlines()]
+
+def get_objects(frame):
+    blob = cv2.dnn.blobFromImage(frame, 0.00392, (416, 416), (0, 0, 0), True, crop=False)
+    yolo_net.setInput(blob)
+    outputs = yolo_net.forward(output_layers)
+
+    class_ids = []
+    confidences = []
+    boxes = []
+
+    height, width, channels = frame.shape
+    for out in outputs:
+        for detection in out:
+            scores = detection[5:]
+            class_id = np.argmax(scores)
+            confidence = scores[class_id]
+            if confidence > 0.5:  # 50% 이상일 때만 인식
+                center_x = int(detection[0] * width)
+                center_y = int(detection[1] * height)
+                w = int(detection[2] * width)
+                h = int(detection[3] * height)
+                x = int(center_x - w / 2)
+                y = int(center_y - h / 2)
+                boxes.append([x, y, w, h])
+                confidences.append(float(confidence))
+                class_ids.append(class_id)
+
+    indexes = cv2.dnn.NMSBoxes(boxes, confidences, 0.5, 0.4)
+    return class_ids, boxes, indexes
+
+def gen_frames():
     while True:
         ret, frame = cap.read()
         if not ret:
             break
 
-        # 객체 감지 수행
-        detections = detect_objects(frame)
-        
-        # React 클라이언트에 객체 감지 정보 전송 (WebSocket)
-        socketio.emit('detections', {'detections': detections})
+        class_ids, boxes, indexes = get_objects(frame)
 
-        # MJPEG 형식으로 비디오 스트리밍
-        ret, jpeg = cv2.imencode('.jpg', frame)
-        if not ret:
-            continue
-        frame = jpeg.tobytes()
+        # 차량 클래스 (자동차, 트럭, 버스 등)만 필터링
+        vehicle_types = []
+        for i in range(len(boxes)):
+            if i in indexes:
+                x, y, w, h = boxes[i]
+                label = str(classes[class_ids[i]])
+                if label in ["car", "truck", "bus"]:
+                    vehicle_types.append(label)
+                cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
+                cv2.putText(frame, label, (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+
+        # 차량 정보를 클라이언트에 보내기
+        ret, buffer = cv2.imencode('.jpg', frame)
+        frame = buffer.tobytes()
 
         yield (b'--frame\r\n'
                b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n\r\n')
 
-# 비디오 스트림을 클라이언트로 전송하는 라우트
-@app.route('/video_feed')
-def video_feed():
-    return Response(generate_video_stream(),
-                    mimetype='multipart/x-mixed-replace; boundary=frame')
+@app.route('/video')
+def video():
+    return Response(gen_frames(), mimetype='multipart/x-mixed-replace; boundary=frame')
 
-# API 엔드포인트 예시: 특정 데이터 제공
-@app.route('/get_info', methods=['GET'])
-def get_info():
-    return jsonify({
-        "message": "Jetson Nano에서 객체 감지 기능이 활성화되었습니다.",
-        "status": "success"
-    })
+@app.route('/vehicle_info')
+def vehicle_info():
+    # 차량 종류를 JSON 형식으로 반환 (예시)
+    vehicle_types = ["car", "truck"]
+    return jsonify(vehicle_types)
 
-# WebSocket 연결을 통한 실시간 데이터 전송
-@socketio.on('connect')
-def handle_connect():
-    print("클라이언트가 연결되었습니다.")
-    emit('message', {'data': '클라이언트가 성공적으로 연결되었습니다!'})
-
-# 클라이언트로부터 메시지 받기
-@socketio.on('client_message')
-def handle_client_message(message):
-    print(f"클라이언트로부터 받은 메시지: {message['data']}")
-    emit('server_response', {'data': '서버에서 받은 메시지 응답!'})
+@app.route('/')
+def index():
+    return render_template('index.html')
 
 if __name__ == '__main__':
-    # SSL 인증서 경로 설정 (HTTPS 설정)
-    context = ('/path/to/cert.pem', '/path/to/key.pem')  # SSL 인증서 파일 경로
-    # WebSocket과 API 서버 실행
-    socketio.run(app, host='0.0.0.0', port=5000, debug=True, ssl_context=context)
+    app.run(debug=True, host='0.0.0.0', port=5000)
