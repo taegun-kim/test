@@ -1,38 +1,29 @@
-from flask import Flask, render_template, Response
 import cv2
+from flask import Flask, render_template, Response
+from flask_cors import CORS  # CORS를 import 합니다
 
 app = Flask(__name__)
+CORS(app)  # CORS 설정
 
-# 카메라 연결 (0은 기본 카메라를 의미)
-cap = cv2.VideoCapture(0)
+# OpenCV로 카메라 스트림 열기
+cap = cv2.VideoCapture(0)  # 0번 카메라는 기본 카메라 (웹캠)
 
-# 카메라에서 프레임을 캡처하고, 클라이언트에게 전송할 수 있도록 JPEG 형식으로 변환
-def gen_frames():
+# 카메라 프레임을 JPEG 형식으로 인코딩하여 웹에서 받을 수 있도록 함
+def generate_frames():
     while True:
-        ret, frame = cap.read()
-        if not ret:
+        success, frame = cap.read()
+        if not success:
             break
+        else:
+            ret, buffer = cv2.imencode('.jpg', frame)
+            frame = buffer.tobytes()
+            yield (b'--frame\r\n'
+                   b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n\r\n')
 
-        # 카메라에서 캡처한 프레임을 JPEG로 인코딩
-        ret, buffer = cv2.imencode('.jpg', frame)
-        if not ret:
-            continue
-
-        frame = buffer.tobytes()
-
-        # 클라이언트에게 보내는 스트리밍 형식으로 데이터를 반환
-        yield (b'--frame\r\n'
-               b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n\r\n')
-
-# /video 라우트에서 실시간 카메라 스트리밍 반환
-@app.route('/video')
-def video():
-    return Response(gen_frames(), mimetype='multipart/x-mixed-replace; boundary=frame')
-
-# 기본 페이지 라우트 (웹 페이지)
-@app.route('/')
-def index():
-    return render_template('index.html')
+# 비디오 스트림을 제공하는 라우트
+@app.route('/video_feed')
+def video_feed():
+    return Response(generate_frames(), mimetype='multipart/x-mixed-replace; boundary=frame')
 
 if __name__ == '__main__':
-    app.run(debug=True, host='0.0.0.0', port=5000)
+    app.run(debug=True, host='0.0.0.0', port=5001)  # React 앱과 포트 충돌 피하려면 다른 포트 사용
