@@ -1,5 +1,3 @@
 Flask
 opencv-python-headless
-numpy
 flask-cors
-gunicorn
